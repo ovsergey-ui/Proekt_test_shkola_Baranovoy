@@ -261,6 +261,7 @@
 
     <section class="content">
       <div id="status" class="status">Ожидание выбора папки...</div>
+      <div id="parserStatus" class="status">Проверка локальных парсеров PDF/DOCX...</div>
 
       <section class="file-panel">
         <div class="file-panel-header">
@@ -303,7 +304,11 @@
     const state = {
       dirHandle: null,
       files: [],
-      analysis: null
+      analysis: null,
+      parserSupport: {
+        pdf: false,
+        docx: false
+      }
     };
 
     const ui = {
@@ -311,6 +316,7 @@
       analyzeBtn: document.getElementById("analyzeBtn"),
       generateBtn: document.getElementById("generateBtn"),
       status: document.getElementById("status"),
+      parserStatus: document.getElementById("parserStatus"),
       fileCount: document.getElementById("fileCount"),
       fileContainer: document.getElementById("fileContainer"),
       analysisOutput: document.getElementById("analysisOutput"),
@@ -323,6 +329,7 @@
     ui.analyzeBtn.addEventListener("click", handleAnalyze);
     ui.generateBtn.addEventListener("click", handleGenerate);
     ui.templateSelect.addEventListener("change", applySuggestedFileName);
+    initializeParsers();
 
     async function handlePickDirectory() {
       if (!("showDirectoryPicker" in window)) {
@@ -400,6 +407,14 @@
     }
 
     async function readFileContent(file, type) {
+      if (type === "application/pdf") {
+        return await readPdfContent(file);
+      }
+
+      if (type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+        return await readDocxContent(file);
+      }
+
       const textLikePrefixes = ["text/"];
       const textLikeTypes = new Set([
         "application/json",
@@ -421,6 +436,111 @@
         return await file.text();
       } catch (error) {
         console.warn(`Не удалось прочитать файл "${file.name}":`, error);
+        return "";
+      }
+    }
+
+    async function initializeParsers() {
+      const [pdfReady, docxReady] = await Promise.all([
+        ensurePdfJsLoaded(),
+        ensureMammothLoaded()
+      ]);
+
+      state.parserSupport.pdf = pdfReady;
+      state.parserSupport.docx = docxReady;
+      renderParserStatus();
+    }
+
+    function renderParserStatus() {
+      const pdfText = state.parserSupport.pdf ? "PDF: OK" : "PDF: недоступен";
+      const docxText = state.parserSupport.docx ? "DOCX: OK" : "DOCX: недоступен";
+      ui.parserStatus.textContent =
+        `${pdfText}, ${docxText}. Для оффлайн-режима положите библиотеки в ./libs/pdf.min.js и ./libs/mammoth.browser.min.js`;
+      ui.parserStatus.classList.toggle("ok", state.parserSupport.pdf || state.parserSupport.docx);
+    }
+
+    async function ensureScriptBySrc(src) {
+      if (document.querySelector(`script[data-loader-src="${src}"]`)) {
+        return true;
+      }
+
+      return await new Promise((resolve) => {
+        const script = document.createElement("script");
+        script.src = src;
+        script.async = true;
+        script.dataset.loaderSrc = src;
+        script.onload = () => resolve(true);
+        script.onerror = () => resolve(false);
+        document.head.append(script);
+      });
+    }
+
+    async function ensurePdfJsLoaded() {
+      if (window.pdfjsLib) {
+        return true;
+      }
+
+      const loadedLocal = await ensureScriptBySrc("./libs/pdf.min.js");
+      if (loadedLocal && window.pdfjsLib) {
+        if (!window.pdfjsLib.GlobalWorkerOptions.workerSrc) {
+          window.pdfjsLib.GlobalWorkerOptions.workerSrc = "./libs/pdf.worker.min.js";
+        }
+        return true;
+      }
+
+      return false;
+    }
+
+    async function ensureMammothLoaded() {
+      if (window.mammoth) {
+        return true;
+      }
+
+      const loadedLocal = await ensureScriptBySrc("./libs/mammoth.browser.min.js");
+      if (loadedLocal && window.mammoth) {
+        return true;
+      }
+
+      return false;
+    }
+
+    async function readPdfContent(file) {
+      if (!state.parserSupport.pdf) {
+        return "";
+      }
+
+      try {
+        const bytes = await file.arrayBuffer();
+        const loadingTask = window.pdfjsLib.getDocument({ data: bytes });
+        const pdf = await loadingTask.promise;
+        const chunks = [];
+        const pagesToRead = Math.min(pdf.numPages, 20);
+
+        for (let pageNumber = 1; pageNumber <= pagesToRead; pageNumber += 1) {
+          const page = await pdf.getPage(pageNumber);
+          const textContent = await page.getTextContent();
+          const pageText = textContent.items.map((item) => item.str).join(" ");
+          chunks.push(pageText.trim());
+        }
+
+        return chunks.filter(Boolean).join("\n\n");
+      } catch (error) {
+        console.warn(`Ошибка чтения PDF "${file.name}":`, error);
+        return "";
+      }
+    }
+
+    async function readDocxContent(file) {
+      if (!state.parserSupport.docx) {
+        return "";
+      }
+
+      try {
+        const bytes = await file.arrayBuffer();
+        const result = await window.mammoth.extractRawText({ arrayBuffer: bytes });
+        return result.value || "";
+      } catch (error) {
+        console.warn(`Ошибка чтения DOCX "${file.name}":`, error);
         return "";
       }
     }
