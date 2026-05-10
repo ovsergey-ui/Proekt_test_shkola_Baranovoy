@@ -184,6 +184,53 @@
       background: #fcfdff;
     }
 
+    .generator-panel {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    .generator-header {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fbff;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .generator-body {
+      padding: 14px;
+      display: grid;
+      gap: 10px;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      font-size: 14px;
+      color: #374457;
+    }
+
+    select,
+    input,
+    textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font: inherit;
+      color: var(--text);
+      background: #ffffff;
+    }
+
+    textarea {
+      min-height: 120px;
+      resize: vertical;
+      font-family: Consolas, "Cascadia Code", monospace;
+      font-size: 13px;
+    }
+
     @media (max-width: 740px) {
       body {
         padding: 12px;
@@ -227,6 +274,28 @@
         <div class="analysis-header">Результат анализа</div>
         <pre id="analysisOutput" class="analysis-output">Запустите анализ после выбора папки.</pre>
       </section>
+
+      <section class="generator-panel">
+        <div class="generator-header">Генерация похожего документа</div>
+        <div class="generator-body">
+          <label>
+            Шаблон
+            <select id="templateSelect" disabled>
+              <option value="">Сначала выполните анализ</option>
+            </select>
+          </label>
+
+          <label>
+            Новое имя файла (без пути)
+            <input id="newFileNameInput" type="text" placeholder="new-document.txt" />
+          </label>
+
+          <label>
+            Новые данные (JSON)
+            <textarea id="newDataInput" placeholder='{"name":"Иван","date":"2026-05-10"}'></textarea>
+          </label>
+        </div>
+      </section>
     </section>
   </main>
 
@@ -244,11 +313,16 @@
       status: document.getElementById("status"),
       fileCount: document.getElementById("fileCount"),
       fileContainer: document.getElementById("fileContainer"),
-      analysisOutput: document.getElementById("analysisOutput")
+      analysisOutput: document.getElementById("analysisOutput"),
+      templateSelect: document.getElementById("templateSelect"),
+      newFileNameInput: document.getElementById("newFileNameInput"),
+      newDataInput: document.getElementById("newDataInput")
     };
 
     ui.pickDirBtn.addEventListener("click", handlePickDirectory);
     ui.analyzeBtn.addEventListener("click", handleAnalyze);
+    ui.generateBtn.addEventListener("click", handleGenerate);
+    ui.templateSelect.addEventListener("change", applySuggestedFileName);
 
     async function handlePickDirectory() {
       if (!("showDirectoryPicker" in window)) {
@@ -264,7 +338,9 @@
         state.analysis = null;
         renderFileList(state.files);
         renderAnalysis(null);
+        populateTemplateSelect([]);
         ui.analyzeBtn.disabled = state.files.length === 0;
+        ui.generateBtn.disabled = true;
         setStatus(`Папка "${handle.name}" выбрана. Файлов: ${state.files.length}.`, true);
       } catch (error) {
         if (error && error.name === "AbortError") {
@@ -382,6 +458,7 @@
       try {
         state.analysis = analyzeFiles(state.files);
         renderAnalysis(state.analysis);
+        populateTemplateSelect(state.analysis.templates);
         ui.generateBtn.disabled = state.analysis.templates.length === 0;
         setStatus("Анализ завершен. Выберите шаблон на следующем шаге.", true);
       } catch (error) {
@@ -515,6 +592,178 @@
       }
 
       ui.analysisOutput.textContent = lines.join("\n");
+    }
+
+    function populateTemplateSelect(templates) {
+      ui.templateSelect.textContent = "";
+      if (!templates.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "Шаблоны не найдены";
+        ui.templateSelect.append(option);
+        ui.templateSelect.disabled = true;
+        return;
+      }
+
+      for (const template of templates) {
+        const option = document.createElement("option");
+        option.value = template.path;
+        option.textContent = `${template.path} (score=${template.score})`;
+        ui.templateSelect.append(option);
+      }
+
+      ui.templateSelect.disabled = false;
+      applySuggestedFileName();
+    }
+
+    function applySuggestedFileName() {
+      const selectedPath = ui.templateSelect.value;
+      if (!selectedPath) {
+        return;
+      }
+
+      const basename = selectedPath.includes("/") ? selectedPath.split("/").at(-1) : selectedPath;
+      const dotIndex = basename.lastIndexOf(".");
+      const name = dotIndex === -1 ? basename : basename.slice(0, dotIndex);
+      const ext = dotIndex === -1 ? ".txt" : basename.slice(dotIndex);
+      ui.newFileNameInput.value = `${name}-generated${ext}`;
+    }
+
+    function findTemplateFile(path) {
+      return state.files.find((file) => file.path === path);
+    }
+
+    function parseNewDataInput(rawText) {
+      const trimmed = rawText.trim();
+      if (!trimmed) {
+        return {};
+      }
+
+      return JSON.parse(trimmed);
+    }
+
+    function generateSimilar(template, newData) {
+      const source = template.content || "";
+      const replacedByBraces = source.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (full, key) => {
+        return formatReplacement(newData[key], full);
+      });
+
+      const replacedByBrackets = replacedByBraces.replace(/\[\s*([a-zA-Z0-9_.-]+)\s*\]/g, (full, key) => {
+        return formatReplacement(newData[key], full);
+      });
+
+      const mergedAppendix = buildAppendix(newData);
+      const generatedText = mergedAppendix ? `${replacedByBrackets}\n\n${mergedAppendix}` : replacedByBrackets;
+
+      return new Blob([generatedText], { type: template.type || "text/plain" });
+    }
+
+    function formatReplacement(value, fallback) {
+      if (value === undefined || value === null) {
+        return fallback;
+      }
+
+      if (typeof value === "object") {
+        return JSON.stringify(value);
+      }
+
+      return String(value);
+    }
+
+    function buildAppendix(newData) {
+      const entries = Object.entries(newData);
+      if (!entries.length) {
+        return "";
+      }
+
+      const lines = ["---", "Generated data:"];
+      for (const [key, value] of entries) {
+        const text = typeof value === "object" ? JSON.stringify(value) : String(value);
+        lines.push(`- ${key}: ${text}`);
+      }
+      return lines.join("\n");
+    }
+
+    function createPickerTypesFromTemplate(template) {
+      const extension = getExtension(template.path);
+      if (!extension || extension === "(без расширения)") {
+        return [];
+      }
+
+      return [
+        {
+          description: "Документ",
+          accept: {
+            [template.type || "text/plain"]: [extension]
+          }
+        }
+      ];
+    }
+
+    async function saveGeneratedBlob(blob, suggestedName, template) {
+      if ("showSaveFilePicker" in window) {
+        const handle = await window.showSaveFilePicker({
+          suggestedName,
+          types: createPickerTypesFromTemplate(template)
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        return handle.name || suggestedName;
+      }
+
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = suggestedName;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      return suggestedName;
+    }
+
+    async function handleGenerate() {
+      try {
+        const selectedTemplatePath = ui.templateSelect.value;
+        if (!selectedTemplatePath) {
+          setStatus("Сначала выберите шаблон.", false);
+          return;
+        }
+
+        const template = findTemplateFile(selectedTemplatePath);
+        if (!template) {
+          setStatus("Шаблон не найден в списке файлов.", false);
+          return;
+        }
+
+        if (!template.content) {
+          setStatus("Шаблон пустой или бинарный. Выберите текстовый документ.", false);
+          return;
+        }
+
+        const newData = parseNewDataInput(ui.newDataInput.value);
+        const fallbackName = selectedTemplatePath.split("/").at(-1) || "generated.txt";
+        const finalName = ui.newFileNameInput.value.trim() || fallbackName;
+        const blob = generateSimilar(template, newData);
+
+        ui.generateBtn.disabled = true;
+        setStatus("Генерация и сохранение документа...", false);
+        const savedName = await saveGeneratedBlob(blob, finalName, template);
+        setStatus(`Документ сохранен: ${savedName}`, true);
+      } catch (error) {
+        if (error && error.name === "AbortError") {
+          setStatus("Сохранение отменено пользователем.", false);
+          return;
+        }
+
+        if (error instanceof SyntaxError) {
+          setStatus("Неверный JSON в поле 'Новые данные'.", false);
+          return;
+        }
+
+        setStatus(`Ошибка генерации: ${error.message}`, false);
+      } finally {
+        ui.generateBtn.disabled = !state.analysis || state.analysis.templates.length === 0;
+      }
     }
 
     function setStatus(text, isOk) {
