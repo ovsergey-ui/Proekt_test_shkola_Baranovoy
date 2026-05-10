@@ -223,7 +223,7 @@
         setStatus("Запрос доступа к папке...", false);
         const handle = await window.showDirectoryPicker({ mode: "read" });
         state.dirHandle = handle;
-        state.files = await listFiles(handle);
+        state.files = await scanDir(handle);
         renderFileList(state.files);
         ui.analyzeBtn.disabled = state.files.length === 0;
         setStatus(`Папка "${handle.name}" выбрана. Файлов: ${state.files.length}.`, true);
@@ -237,18 +237,77 @@
       }
     }
 
-    async function listFiles(dirHandle, parentPath = "") {
+    async function scanDir(dirHandle, parentPath = "") {
       const results = [];
       for await (const [name, handle] of dirHandle.entries()) {
         const path = parentPath ? `${parentPath}/${name}` : name;
         if (handle.kind === "file") {
-          results.push(path);
+          const file = await handle.getFile();
+          const type = resolveFileType(file, path);
+          const content = await readFileContent(file, type);
+          results.push({
+            path,
+            type,
+            content
+          });
         } else if (handle.kind === "directory") {
-          const nested = await listFiles(handle, path);
+          const nested = await scanDir(handle, path);
           results.push(...nested);
         }
       }
-      return results.sort((a, b) => a.localeCompare(b, "ru"));
+      return results.sort((a, b) => a.path.localeCompare(b.path, "ru"));
+    }
+
+    function resolveFileType(file, path) {
+      if (file.type) {
+        return file.type;
+      }
+
+      const dotIndex = path.lastIndexOf(".");
+      if (dotIndex === -1 || dotIndex === path.length - 1) {
+        return "application/octet-stream";
+      }
+
+      const ext = path.slice(dotIndex + 1).toLowerCase();
+      const byExt = {
+        txt: "text/plain",
+        md: "text/markdown",
+        json: "application/json",
+        csv: "text/csv",
+        html: "text/html",
+        js: "text/javascript",
+        ts: "text/typescript",
+        pdf: "application/pdf",
+        docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      };
+
+      return byExt[ext] || "application/octet-stream";
+    }
+
+    async function readFileContent(file, type) {
+      const textLikePrefixes = ["text/"];
+      const textLikeTypes = new Set([
+        "application/json",
+        "application/xml",
+        "application/javascript",
+        "text/javascript",
+        "text/typescript",
+        "text/markdown"
+      ]);
+
+      const isTextLike =
+        textLikePrefixes.some((prefix) => type.startsWith(prefix)) || textLikeTypes.has(type);
+
+      if (!isTextLike) {
+        return "";
+      }
+
+      try {
+        return await file.text();
+      } catch (error) {
+        console.warn(`Не удалось прочитать файл "${file.name}":`, error);
+        return "";
+      }
     }
 
     function renderFileList(files) {
@@ -261,9 +320,9 @@
 
       const list = document.createElement("ol");
       list.className = "file-list";
-      for (const path of files) {
+      for (const file of files) {
         const item = document.createElement("li");
-        item.textContent = path;
+        item.textContent = `${file.path} (${file.type})`;
         list.append(item);
       }
 
