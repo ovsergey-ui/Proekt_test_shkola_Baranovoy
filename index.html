@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Локальный Анализатор Документов</title>
+  <style>
+    :root {
+      --bg: #eef2f7;
+      --panel: #ffffff;
+      --line: #d4dbe6;
+      --text: #1f2937;
+      --muted: #5f6b7a;
+      --primary: #3567a8;
+      --primary-hover: #2f5b96;
+      --ok: #2b7a4b;
+      --shadow: 0 12px 26px rgba(22, 37, 66, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      color: var(--text);
+      background: linear-gradient(160deg, #edf2f7 0%, #e5ecf5 100%);
+      padding: 24px;
+    }
+
+    .app {
+      max-width: 980px;
+      margin: 0 auto;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .header {
+      padding: 24px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fbff;
+    }
+
+    .title {
+      margin: 0 0 8px;
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+    }
+
+    .subtitle {
+      margin: 0;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(160px, 1fr));
+      gap: 12px;
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    button {
+      border: none;
+      border-radius: 12px;
+      padding: 14px 16px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.1s ease, background-color 0.2s ease, opacity 0.2s ease;
+      color: #fff;
+      background: var(--primary);
+    }
+
+    button:hover:not(:disabled) {
+      transform: translateY(-1px);
+      background: var(--primary-hover);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+
+    .secondary {
+      background: #6b7f99;
+    }
+
+    .secondary:hover:not(:disabled) {
+      background: #5f7187;
+    }
+
+    .content {
+      padding: 20px 24px 24px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .status {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px 16px;
+      background: #fbfdff;
+      color: var(--muted);
+      min-height: 52px;
+    }
+
+    .status.ok {
+      color: var(--ok);
+      border-color: #b6ddc6;
+      background: #f3fbf6;
+    }
+
+    .file-panel {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    .file-panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fbff;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .file-list {
+      margin: 0;
+      padding: 8px 14px 16px 28px;
+      max-height: 420px;
+      overflow: auto;
+    }
+
+    .file-list li {
+      margin: 6px 0;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+
+    .empty {
+      padding: 18px 14px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 740px) {
+      body {
+        padding: 12px;
+      }
+
+      .toolbar {
+        grid-template-columns: 1fr;
+      }
+
+      .title {
+        font-size: 24px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="header">
+      <h1 class="title">Локальный Анализатор Документов</h1>
+      <p class="subtitle">Оффлайн-режим: выберите папку, чтобы просмотреть структуру файлов.</p>
+    </header>
+
+    <section class="toolbar">
+      <button id="pickDirBtn">Выбрать папку</button>
+      <button id="analyzeBtn" class="secondary" disabled>Анализировать</button>
+      <button id="generateBtn" class="secondary" disabled>Генерировать</button>
+    </section>
+
+    <section class="content">
+      <div id="status" class="status">Ожидание выбора папки...</div>
+
+      <section class="file-panel">
+        <div class="file-panel-header">
+          <span>Найденные файлы</span>
+          <strong id="fileCount">0</strong>
+        </div>
+        <div id="fileContainer" class="empty">Список появится после выбора папки.</div>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      dirHandle: null,
+      files: []
+    };
+
+    const ui = {
+      pickDirBtn: document.getElementById("pickDirBtn"),
+      analyzeBtn: document.getElementById("analyzeBtn"),
+      generateBtn: document.getElementById("generateBtn"),
+      status: document.getElementById("status"),
+      fileCount: document.getElementById("fileCount"),
+      fileContainer: document.getElementById("fileContainer")
+    };
+
+    ui.pickDirBtn.addEventListener("click", handlePickDirectory);
+
+    async function handlePickDirectory() {
+      if (!("showDirectoryPicker" in window)) {
+        setStatus("Ваш браузер не поддерживает File System Access API.", false);
+        return;
+      }
+
+      try {
+        setStatus("Запрос доступа к папке...", false);
+        const handle = await window.showDirectoryPicker({ mode: "read" });
+        state.dirHandle = handle;
+        state.files = await listFiles(handle);
+        renderFileList(state.files);
+        ui.analyzeBtn.disabled = state.files.length === 0;
+        setStatus(`Папка "${handle.name}" выбрана. Файлов: ${state.files.length}.`, true);
+      } catch (error) {
+        if (error && error.name === "AbortError") {
+          setStatus("Выбор папки отменен пользователем.", false);
+          return;
+        }
+
+        setStatus(`Не удалось получить доступ к папке: ${error.message}`, false);
+      }
+    }
+
+    async function listFiles(dirHandle, parentPath = "") {
+      const results = [];
+      for await (const [name, handle] of dirHandle.entries()) {
+        const path = parentPath ? `${parentPath}/${name}` : name;
+        if (handle.kind === "file") {
+          results.push(path);
+        } else if (handle.kind === "directory") {
+          const nested = await listFiles(handle, path);
+          results.push(...nested);
+        }
+      }
+      return results.sort((a, b) => a.localeCompare(b, "ru"));
+    }
+
+    function renderFileList(files) {
+      ui.fileCount.textContent = String(files.length);
+      if (!files.length) {
+        ui.fileContainer.className = "empty";
+        ui.fileContainer.textContent = "В выбранной папке не найдено файлов.";
+        return;
+      }
+
+      const list = document.createElement("ol");
+      list.className = "file-list";
+      for (const path of files) {
+        const item = document.createElement("li");
+        item.textContent = path;
+        list.append(item);
+      }
+
+      ui.fileContainer.className = "";
+      ui.fileContainer.textContent = "";
+      ui.fileContainer.append(list);
+    }
+
+    function setStatus(text, isOk) {
+      ui.status.textContent = text;
+      ui.status.classList.toggle("ok", Boolean(isOk));
+    }
+  </script>
+</body>
+</html>
