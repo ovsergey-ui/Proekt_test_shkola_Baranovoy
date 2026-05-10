@@ -155,6 +155,14 @@
       font-size: 14px;
     }
 
+    .file-list-footer {
+      padding: 0 14px 14px;
+    }
+
+    .file-list-footer button {
+      width: 100%;
+    }
+
     .analysis-panel {
       border: 1px solid var(--line);
       border-radius: 14px;
@@ -269,6 +277,9 @@
           <strong id="fileCount">0</strong>
         </div>
         <div id="fileContainer" class="empty">Список появится после выбора папки.</div>
+        <div id="fileListFooter" class="file-list-footer" hidden>
+          <button id="loadMoreBtn" class="secondary" type="button">Показать еще</button>
+        </div>
       </section>
 
       <section class="analysis-panel">
@@ -305,6 +316,8 @@
       dirHandle: null,
       files: [],
       analysis: null,
+      visibleFileCount: 0,
+      pageSize: 200,
       parserSupport: {
         pdf: false,
         docx: false
@@ -319,6 +332,8 @@
       parserStatus: document.getElementById("parserStatus"),
       fileCount: document.getElementById("fileCount"),
       fileContainer: document.getElementById("fileContainer"),
+      fileListFooter: document.getElementById("fileListFooter"),
+      loadMoreBtn: document.getElementById("loadMoreBtn"),
       analysisOutput: document.getElementById("analysisOutput"),
       templateSelect: document.getElementById("templateSelect"),
       newFileNameInput: document.getElementById("newFileNameInput"),
@@ -329,6 +344,7 @@
     ui.analyzeBtn.addEventListener("click", handleAnalyze);
     ui.generateBtn.addEventListener("click", handleGenerate);
     ui.templateSelect.addEventListener("change", applySuggestedFileName);
+    ui.loadMoreBtn.addEventListener("click", handleLoadMore);
     initializeParsers();
 
     async function handlePickDirectory() {
@@ -340,15 +356,24 @@
       try {
         setStatus("Запрос доступа к папке...", false);
         const handle = await window.showDirectoryPicker({ mode: "read" });
+        const hasPermission = await requestDirectoryPermission(handle);
+        if (!hasPermission) {
+          setStatus("Доступ к папке не выдан.", false);
+          return;
+        }
+
         state.dirHandle = handle;
-        state.files = await scanDir(handle);
+        const scanContext = createScanContext();
+        state.files = await scanDir(handle, "", scanContext);
         state.analysis = null;
+        state.visibleFileCount = Math.min(state.pageSize, state.files.length);
         renderFileList(state.files);
         renderAnalysis(null);
         populateTemplateSelect([]);
         ui.analyzeBtn.disabled = state.files.length === 0;
         ui.generateBtn.disabled = true;
-        setStatus(`Папка "${handle.name}" выбрана. Файлов: ${state.files.length}.`, true);
+        const warnText = scanContext.errors ? ` Ошибок чтения: ${scanContext.errors}.` : "";
+        setStatus(`Папка "${handle.name}" выбрана. Файлов: ${state.files.length}.${warnText}`, true);
       } catch (error) {
         if (error && error.name === "AbortError") {
           setStatus("Выбор папки отменен пользователем.", false);
@@ -359,21 +384,56 @@
       }
     }
 
-    async function scanDir(dirHandle, parentPath = "") {
+    function createScanContext() {
+      return {
+        filesProcessed: 0,
+        errors: 0,
+        lastProgressStamp: 0
+      };
+    }
+
+    async function requestDirectoryPermission(handle) {
+      if (!handle || !handle.queryPermission) {
+        return true;
+      }
+
+      const query = await handle.queryPermission({ mode: "read" });
+      if (query === "granted") {
+        return true;
+      }
+
+      const requested = await handle.requestPermission({ mode: "read" });
+      return requested === "granted";
+    }
+
+    async function scanDir(dirHandle, parentPath = "", context = createScanContext()) {
       const results = [];
       for await (const [name, handle] of dirHandle.entries()) {
         const path = parentPath ? `${parentPath}/${name}` : name;
         if (handle.kind === "file") {
-          const file = await handle.getFile();
-          const type = resolveFileType(file, path);
-          const content = await readFileContent(file, type);
-          results.push({
-            path,
-            type,
-            content
-          });
+          try {
+            const file = await handle.getFile();
+            const type = resolveFileType(file, path);
+            const content = await readFileContent(file, type);
+            results.push({
+              path,
+              type,
+              content
+            });
+          } catch (error) {
+            context.errors += 1;
+            console.warn(`Ошибка доступа к файлу "${path}":`, error);
+          } finally {
+            context.filesProcessed += 1;
+            const now = performance.now();
+            if (now - context.lastProgressStamp > 160) {
+              setStatus(`Сканирование... обработано файлов: ${context.filesProcessed}`, false);
+              context.lastProgressStamp = now;
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+          }
         } else if (handle.kind === "directory") {
-          const nested = await scanDir(handle, path);
+          const nested = await scanDir(handle, path, context);
           results.push(...nested);
         }
       }
@@ -550,12 +610,14 @@
       if (!files.length) {
         ui.fileContainer.className = "empty";
         ui.fileContainer.textContent = "В выбранной папке не найдено файлов.";
+        ui.fileListFooter.hidden = true;
         return;
       }
 
+      const visibleFiles = files.slice(0, state.visibleFileCount);
       const list = document.createElement("ol");
       list.className = "file-list";
-      for (const file of files) {
+      for (const file of visibleFiles) {
         const item = document.createElement("li");
         item.textContent = `${file.path} (${file.type})`;
         list.append(item);
@@ -564,6 +626,15 @@
       ui.fileContainer.className = "";
       ui.fileContainer.textContent = "";
       ui.fileContainer.append(list);
+
+      const hiddenCount = files.length - visibleFiles.length;
+      ui.fileListFooter.hidden = hiddenCount <= 0;
+      ui.loadMoreBtn.textContent = `Показать еще (${hiddenCount})`;
+    }
+
+    function handleLoadMore() {
+      state.visibleFileCount = Math.min(state.visibleFileCount + state.pageSize, state.files.length);
+      renderFileList(state.files);
     }
 
     async function handleAnalyze() {
