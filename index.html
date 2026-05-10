@@ -155,6 +155,35 @@
       font-size: 14px;
     }
 
+    .analysis-panel {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    .analysis-header {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fbff;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .analysis-output {
+      margin: 0;
+      padding: 14px;
+      min-height: 140px;
+      max-height: 300px;
+      overflow: auto;
+      white-space: pre-wrap;
+      line-height: 1.45;
+      font-family: Consolas, "Cascadia Code", monospace;
+      font-size: 13px;
+      color: #213048;
+      background: #fcfdff;
+    }
+
     @media (max-width: 740px) {
       body {
         padding: 12px;
@@ -193,13 +222,19 @@
         </div>
         <div id="fileContainer" class="empty">Список появится после выбора папки.</div>
       </section>
+
+      <section class="analysis-panel">
+        <div class="analysis-header">Результат анализа</div>
+        <pre id="analysisOutput" class="analysis-output">Запустите анализ после выбора папки.</pre>
+      </section>
     </section>
   </main>
 
   <script>
     const state = {
       dirHandle: null,
-      files: []
+      files: [],
+      analysis: null
     };
 
     const ui = {
@@ -208,10 +243,12 @@
       generateBtn: document.getElementById("generateBtn"),
       status: document.getElementById("status"),
       fileCount: document.getElementById("fileCount"),
-      fileContainer: document.getElementById("fileContainer")
+      fileContainer: document.getElementById("fileContainer"),
+      analysisOutput: document.getElementById("analysisOutput")
     };
 
     ui.pickDirBtn.addEventListener("click", handlePickDirectory);
+    ui.analyzeBtn.addEventListener("click", handleAnalyze);
 
     async function handlePickDirectory() {
       if (!("showDirectoryPicker" in window)) {
@@ -224,7 +261,9 @@
         const handle = await window.showDirectoryPicker({ mode: "read" });
         state.dirHandle = handle;
         state.files = await scanDir(handle);
+        state.analysis = null;
         renderFileList(state.files);
+        renderAnalysis(null);
         ui.analyzeBtn.disabled = state.files.length === 0;
         setStatus(`Папка "${handle.name}" выбрана. Файлов: ${state.files.length}.`, true);
       } catch (error) {
@@ -329,6 +368,153 @@
       ui.fileContainer.className = "";
       ui.fileContainer.textContent = "";
       ui.fileContainer.append(list);
+    }
+
+    async function handleAnalyze() {
+      if (!state.files.length) {
+        setStatus("Нет файлов для анализа.", false);
+        return;
+      }
+
+      setStatus("Идет анализ структуры и содержимого...", false);
+      ui.analyzeBtn.disabled = true;
+
+      try {
+        state.analysis = analyzeFiles(state.files);
+        renderAnalysis(state.analysis);
+        ui.generateBtn.disabled = state.analysis.templates.length === 0;
+        setStatus("Анализ завершен. Выберите шаблон на следующем шаге.", true);
+      } catch (error) {
+        setStatus(`Ошибка анализа: ${error.message}`, false);
+      } finally {
+        ui.analyzeBtn.disabled = false;
+      }
+    }
+
+    function analyzeFiles(files) {
+      const byType = new Map();
+      const byExtension = new Map();
+      const headerFrequency = new Map();
+      const templates = [];
+
+      for (const file of files) {
+        incrementMap(byType, file.type);
+        incrementMap(byExtension, getExtension(file.path));
+
+        if (!file.content) {
+          continue;
+        }
+
+        const headers = extractHeaders(file.content);
+        for (const header of headers) {
+          incrementMap(headerFrequency, header.toLowerCase());
+        }
+
+        const placeholderCount = countPlaceholders(file.content);
+        const score = headers.length * 3 + placeholderCount * 2 + Math.min(file.content.length / 400, 6);
+
+        if (score >= 4) {
+          templates.push({
+            path: file.path,
+            type: file.type,
+            score: Number(score.toFixed(2)),
+            headers: headers.slice(0, 5)
+          });
+        }
+      }
+
+      templates.sort((a, b) => b.score - a.score);
+
+      return {
+        patterns: {
+          totalFiles: files.length,
+          byType: mapToSortedArray(byType),
+          byExtension: mapToSortedArray(byExtension),
+          commonHeaders: mapToSortedArray(headerFrequency).slice(0, 10)
+        },
+        templates: templates.slice(0, 20)
+      };
+    }
+
+    function extractHeaders(text) {
+      const lines = text.split(/\r?\n/);
+      const headers = [];
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          continue;
+        }
+
+        if (trimmed.startsWith("#")) {
+          headers.push(trimmed.replace(/^#+\s*/, ""));
+          continue;
+        }
+
+        if (/^[A-ZА-Я0-9][A-ZА-Я0-9\s\-]{4,}$/.test(trimmed)) {
+          headers.push(trimmed);
+        }
+      }
+
+      return headers;
+    }
+
+    function countPlaceholders(text) {
+      const matches = text.match(/(\{\{[^}]+\}\}|\[[^\]]+\]|<[^>]+>)/g);
+      return matches ? matches.length : 0;
+    }
+
+    function getExtension(path) {
+      const dotIndex = path.lastIndexOf(".");
+      return dotIndex === -1 ? "(без расширения)" : path.slice(dotIndex).toLowerCase();
+    }
+
+    function incrementMap(map, key) {
+      const current = map.get(key) || 0;
+      map.set(key, current + 1);
+    }
+
+    function mapToSortedArray(map) {
+      return [...map.entries()]
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "ru"));
+    }
+
+    function renderAnalysis(analysis) {
+      if (!analysis) {
+        ui.analysisOutput.textContent = "Запустите анализ после выбора папки.";
+        return;
+      }
+
+      const lines = [];
+      lines.push("== Общая статистика ==");
+      lines.push(`Файлов всего: ${analysis.patterns.totalFiles}`);
+      lines.push("");
+      lines.push("== По типам (top 8) ==");
+      lines.push(...analysis.patterns.byType.slice(0, 8).map((x) => `- ${x.name}: ${x.count}`));
+      lines.push("");
+      lines.push("== По расширениям (top 8) ==");
+      lines.push(...analysis.patterns.byExtension.slice(0, 8).map((x) => `- ${x.name}: ${x.count}`));
+      lines.push("");
+      lines.push("== Частые заголовки (top 10) ==");
+      if (analysis.patterns.commonHeaders.length) {
+        lines.push(...analysis.patterns.commonHeaders.map((x) => `- ${x.name}: ${x.count}`));
+      } else {
+        lines.push("- Заголовки не найдены");
+      }
+      lines.push("");
+      lines.push("== Кандидаты в шаблоны (top 10) ==");
+      if (analysis.templates.length) {
+        lines.push(
+          ...analysis.templates
+            .slice(0, 10)
+            .map((t, idx) => `${idx + 1}. ${t.path} | score=${t.score} | headers=${t.headers.length}`)
+        );
+      } else {
+        lines.push("- Подходящие шаблоны не найдены");
+      }
+
+      ui.analysisOutput.textContent = lines.join("\n");
     }
 
     function setStatus(text, isOk) {
